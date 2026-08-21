@@ -1,10 +1,13 @@
+import sys
+import os
+
+# root directory k python path-e add kora hocche jate bot.py easily import hoy
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import asyncio
 import json
-import os
 from http.server import BaseHTTPRequestHandler
-
 from telegram import Update
-
 from bot import app, initialize_app, WEBHOOK_SECRET
 
 

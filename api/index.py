@@ -4,7 +4,7 @@ import json
 import asyncio
 from http.server import BaseHTTPRequestHandler
 
-# Root Path সেট করা
+# Path ঠিক করা
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 class handler(BaseHTTPRequestHandler):
@@ -16,20 +16,19 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            from bot import app, initialize_app
+            from bot import create_app
             from telegram import Update
 
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
             json_data = json.loads(post_data.decode('utf-8'))
 
-            # Async execution
-            async def run():
-                await initialize_app()
+            async def main():
+                app = create_app()
                 async with app:
                     await app.process_update(Update.de_json(json_data, app.bot))
 
-            asyncio.run(run())
+            asyncio.run(main())
 
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')

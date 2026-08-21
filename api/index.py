@@ -4,7 +4,7 @@ import json
 import asyncio
 from http.server import BaseHTTPRequestHandler
 
-# Root path যুক্ত করা
+# Root Path সেট করা
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 class handler(BaseHTTPRequestHandler):
@@ -16,19 +16,20 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            from bot import app
+            from bot import app, initialize_app
             from telegram import Update
 
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
             json_data = json.loads(post_data.decode('utf-8'))
 
-            # Vercel-এর জন্য Async loop
-            async def main():
+            # Async execution
+            async def run():
+                await initialize_app()
                 async with app:
                     await app.process_update(Update.de_json(json_data, app.bot))
 
-            asyncio.run(main())
+            asyncio.run(run())
 
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')

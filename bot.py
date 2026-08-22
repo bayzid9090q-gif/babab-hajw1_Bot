@@ -5,47 +5,28 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 
-# ==============================================================================
+# ============================================================
 # CONFIG
-# ==============================================================================
+# ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN environment variable is not set.")
+    raise RuntimeError("BOT_TOKEN is missing.")
 
-try:
-    CHANNEL_ID = int(
-        os.getenv("CHANNEL_ID", "-1003087197996").strip()
-    )
-except ValueError:
-    raise RuntimeError("CHANNEL_ID must be a valid Telegram chat ID.")
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "-1003087197996"))
 
 CHANNEL_LINK = os.getenv(
     "CHANNEL_LINK",
-    "https://t.me/u20fgDLKHLHnZjV1",
+    "https://t.me/u20fgDLKHLHnZjV1"
 ).strip()
 
 DB_PATH = os.getenv("DB_PATH", "./bot.db").strip()
-
-DB = Path(DB_PATH)
-DB.parent.mkdir(parents=True, exist_ok=True)
-
-BD_TIMEZONE = ZoneInfo("Asia/Dhaka")
 
 ADMIN_IDS = {
     8040845647,
@@ -53,23 +34,29 @@ ADMIN_IDS = {
     6905592655,
 }
 
-WHEEL = [1, 0, 3, 0, 5, 0, 1, 0]
-
 REQUIRED_REFERRALS = 5
 REQUIRED_COINS = 100
 
+WHEEL = [1, 0, 3, 0, 5, 0, 1, 0]
 
-# ==============================================================================
+BD_TIMEZONE = ZoneInfo("Asia/Dhaka")
+
+
+# ============================================================
 # DATABASE
-# ==============================================================================
+# ============================================================
 
-conn = sqlite3.connect(
-    DB,
-    check_same_thread=False,
+db_file = Path(DB_PATH)
+
+db_file.parent.mkdir(
+    parents=True,
+    exist_ok=True
 )
 
-conn.execute("PRAGMA journal_mode=WAL")
-conn.execute("PRAGMA busy_timeout=5000")
+conn = sqlite3.connect(
+    str(db_file),
+    check_same_thread=False
+)
 
 conn.execute("""
 CREATE TABLE IF NOT EXISTS users (
@@ -77,7 +64,7 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT DEFAULT '',
     coins INTEGER DEFAULT 0,
     referrals INTEGER DEFAULT 0,
-    last_spin TEXT
+    last_spin TEXT DEFAULT ''
 )
 """)
 
@@ -100,71 +87,143 @@ CREATE TABLE IF NOT EXISTS panels (
 conn.commit()
 
 
-# ==============================================================================
-# DATABASE HELPERS
-# ==============================================================================
+# ============================================================
+# DATABASE FUNCTIONS
+# ============================================================
 
-def ensure_user(uid: int, username: str = ""):
-    username = username or ""
-
+def ensure_user(user_id, username=""):
     conn.execute(
         """
-        INSERT OR IGNORE INTO users(user_id, username)
+        INSERT OR IGNORE INTO users
+        (user_id, username)
         VALUES (?, ?)
         """,
-        (uid, username),
+        (user_id, username or "")
     )
 
     conn.execute(
         """
         UPDATE users
-        SET username=?
-        WHERE user_id=?
+        SET username = ?
+        WHERE user_id = ?
         """,
-        (username, uid),
+        (username or "", user_id)
     )
 
     conn.commit()
 
 
-def add_panel(name: str, kind: str, value: str):
-    conn.execute(
-        """
-        INSERT INTO panels(name, kind, value)
-        VALUES (?, ?, ?)
-        """,
-        (name, kind, value),
-    )
-
-    conn.commit()
-
-
-def get_user(uid: int):
+def get_user(user_id):
     return conn.execute(
         """
         SELECT coins, referrals, last_spin
         FROM users
-        WHERE user_id=?
+        WHERE user_id = ?
         """,
-        (uid,),
+        (user_id,)
     ).fetchone()
 
 
-def today_bd() -> str:
-    return datetime.now(BD_TIMEZONE).date().isoformat()
+def add_panel(name, kind, value):
+    conn.execute(
+        """
+        INSERT INTO panels
+        (name, kind, value)
+        VALUES (?, ?, ?)
+        """,
+        (name, kind, value)
+    )
+
+    conn.commit()
 
 
-# ==============================================================================
+def today():
+    return datetime.now(
+        BD_TIMEZONE
+    ).date().isoformat()
+
+
+# ============================================================
 # USER MENU
-# ==============================================================================
+# ============================================================
 
-def menu():
+def main_menu():
+
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 "🎯 Daily Spin",
-                callback_data="spin",
+                callback_data="spin"
             ),
             InlineKeyboardButton(
                 "🪙 My Coins",
-                callback_data="coins
+                callback_data="coins"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "👥 Referral",
+                callback_data="ref"
+            ),
+            InlineKeyboardButton(
+                "💎 Paid Panel",
+                callback_data="paid"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🎁 Free Panel",
+                callback_data="free"
+            )
+        ]
+    ])
+
+
+# ============================================================
+# ADMIN MENU
+# ============================================================
+
+def admin_menu():
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "📊 Stats",
+                callback_data="astats"
+            ),
+            InlineKeyboardButton(
+                "📜 Panels",
+                callback_data="alist"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔙 Back",
+                callback_data="back"
+            )
+        ]
+    ])
+
+
+# ============================================================
+# CHANNEL CHECK
+# ============================================================
+
+async def is_joined(bot, user_id):
+
+    try:
+
+        member = await bot.get_chat_member(
+            chat_id=CHANNEL_ID,
+            user_id=user_id
+        )
+
+        return member.status in (
+            "member",
+            "administrator",
+            "creator"
+        )
+
+    except Exception as error:
+
+       

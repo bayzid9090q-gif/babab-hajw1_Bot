@@ -1,0 +1,19 @@
+services:
+  - type: worker
+    name: panel-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: CHANNEL_ID
+        sync: false
+      - key: CHANNEL_LINK
+        sync: false
+      - key: DB_PATH
+        value: /var/data/bot.db
+    disk:
+      name: bot-data
+      mountPath: /var/data
+      sizeGB: 1

@@ -1,44 +1,35 @@
 import os
 import random
 import sqlite3
-from datetime import datetime
+from datetime import date
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
-    CommandHandler,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
 )
 
-
-# ============================================================
+# ==============================================================================
 # CONFIG
-# ============================================================
+# ==============================================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is missing")
-
 CHANNEL_ID = int(
-    os.getenv(
-        "CHANNEL_ID",
-        "-1003087197996"
-    )
+    os.getenv("CHANNEL_ID", "-1003087197996").strip()
 )
 
 CHANNEL_LINK = os.getenv(
     "CHANNEL_LINK",
     "https://t.me/u20fgDLKHLHnZjV1"
-).strip()
-
-DB_PATH = os.getenv(
-    "DB_PATH",
-    "./bot.db"
 ).strip()
 
 ADMIN_IDS = {
@@ -47,94 +38,83 @@ ADMIN_IDS = {
     6905592655,
 }
 
-REQUIRED_REFERRALS = 5
-REQUIRED_COINS = 100
+# Render Free-তে /var/data ব্যবহার করা যাবে না
+# Persistent Disk থাকলে DB_PATH=/var/data/bot.db দিতে পারো।
+# না থাকলে /tmp ব্যবহার হবে।
+db_env = os.getenv("DB_PATH", "").strip()
 
-WHEEL = [
-    1,
-    0,
-    3,
-    0,
-    5,
-    0,
-    1,
-    0,
-]
+if db_env:
+    DB = Path(db_env)
 
-BD_TIMEZONE = ZoneInfo(
-    "Asia/Dhaka"
-)
+    try:
+        DB.parent.mkdir(parents=True, exist_ok=True)
+        test_file = DB.parent / ".write_test"
+
+        with open(test_file, "w") as f:
+            f.write("ok")
+
+        test_file.unlink(missing_ok=True)
+
+    except (PermissionError, OSError):
+        DB = Path("/tmp/panel_bot.db")
+else:
+    DB = Path("/tmp/panel_bot.db")
 
 
-# ============================================================
+# ==============================================================================
 # DATABASE
-# ============================================================
-
-db_file = Path(DB_PATH)
-
-db_file.parent.mkdir(
-    parents=True,
-    exist_ok=True
-)
+# ==============================================================================
 
 conn = sqlite3.connect(
-    str(db_file),
+    DB,
     check_same_thread=False
 )
 
-conn.execute(
-    """
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT DEFAULT '',
-        coins INTEGER DEFAULT 0,
-        referrals INTEGER DEFAULT 0,
-        last_spin TEXT DEFAULT ''
-    )
-    """
+conn.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT DEFAULT '',
+    coins INTEGER DEFAULT 0,
+    referrals INTEGER DEFAULT 0,
+    last_spin TEXT DEFAULT ''
 )
+""")
 
-conn.execute(
-    """
-    CREATE TABLE IF NOT EXISTS referrals (
-        new_user INTEGER PRIMARY KEY,
-        referrer INTEGER NOT NULL
-    )
-    """
+conn.execute("""
+CREATE TABLE IF NOT EXISTS referrals (
+    new_user INTEGER PRIMARY KEY,
+    referrer INTEGER
 )
+""")
 
-conn.execute(
-    """
-    CREATE TABLE IF NOT EXISTS panels (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        value TEXT NOT NULL
-    )
-    """
+conn.execute("""
+CREATE TABLE IF NOT EXISTS panels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL
 )
+""")
 
 conn.commit()
 
+WHEEL = [1, 0, 3, 0, 5, 0, 1, 0]
 
-# ============================================================
+
+# ==============================================================================
 # DATABASE HELPERS
-# ============================================================
+# ==============================================================================
 
-def ensure_user(
-    user_id: int,
-    username: str = ""
-):
+def ensure_user(uid: int, username: str = ""):
+    username = username or ""
+
     conn.execute(
         """
         INSERT OR IGNORE INTO users
-        (user_id, username)
-        VALUES (?, ?)
+        (user_id, username, coins, referrals, last_spin)
+        VALUES (?, ?, 0, 0, '')
         """,
-        (
-            user_id,
-            username or ""
-        )
+        (uid, username),
     )
 
     conn.execute(
@@ -143,226 +123,160 @@ def ensure_user(
         SET username = ?
         WHERE user_id = ?
         """,
-        (
-            username or "",
-            user_id
-        )
+        (username, uid),
     )
 
     conn.commit()
 
 
-def get_user(user_id: int):
+def add_panel(name: str, kind: str, value: str):
+    conn.execute(
+        """
+        INSERT INTO panels (name, kind, value)
+        VALUES (?, ?, ?)
+        """,
+        (name, kind, value),
+    )
+
+    conn.commit()
+
+
+def get_user(uid: int):
     return conn.execute(
         """
         SELECT coins, referrals, last_spin
         FROM users
         WHERE user_id = ?
         """,
-        (user_id,)
+        (uid,),
     ).fetchone()
 
 
-def add_panel(
-    name: str,
-    kind: str,
-    value: str
-):
-    conn.execute(
-        """
-        INSERT INTO panels
-        (name, kind, value)
-        VALUES (?, ?, ?)
-        """,
-        (
-            name,
-            kind,
-            value
-        )
-    )
+# ==============================================================================
+# UI
+# ==============================================================================
 
-    conn.commit()
-
-
-def get_today():
-    return datetime.now(
-        BD_TIMEZONE
-    ).date().isoformat()
-
-
-# ============================================================
-# MAIN MENU
-# ============================================================
-
-def main_menu():
-
-    return InlineKeyboardMarkup(
+def menu():
+    return InlineKeyboardMarkup([
         [
-            [
-                InlineKeyboardButton(
-                    "🎯 Daily Spin",
-                    callback_data="spin"
-                ),
-                InlineKeyboardButton(
-                    "🪙 My Coins",
-                    callback_data="coins"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "👥 Referral",
-                    callback_data="ref"
-                ),
-                InlineKeyboardButton(
-                    "💎 Paid Panel",
-                    callback_data="paid"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "🎁 Free Panel",
-                    callback_data="free"
-                ),
-            ],
-        ]
-    )
+            InlineKeyboardButton(
+                "🎯 Daily Spin",
+                callback_data="spin"
+            ),
+            InlineKeyboardButton(
+                "🪙 My Coins",
+                callback_data="coins"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "👥 Referral",
+                callback_data="ref"
+            ),
+            InlineKeyboardButton(
+                "💎 Paid Panel",
+                callback_data="paid"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🎁 Free Panel",
+                callback_data="free"
+            ),
+        ],
+    ])
 
-
-# ============================================================
-# ADMIN MENU
-# ============================================================
 
 def admin_menu():
-
-    return InlineKeyboardMarkup(
+    return InlineKeyboardMarkup([
         [
-            [
-                InlineKeyboardButton(
-                    "📊 Stats",
-                    callback_data="astats"
-                ),
-                InlineKeyboardButton(
-                    "📜 Panels",
-                    callback_data="alist"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔙 Back",
-                    callback_data="back"
-                ),
-            ],
-        ]
-    )
+            InlineKeyboardButton(
+                "📊 Stats",
+                callback_data="astats"
+            ),
+            InlineKeyboardButton(
+                "📜 Panels",
+                callback_data="alist"
+            ),
+        ],
+    ])
 
 
-# ============================================================
+# ==============================================================================
 # CHANNEL JOIN CHECK
-# ============================================================
+# ==============================================================================
 
-async def is_joined(
-    bot,
-    user_id: int
-) -> bool:
-
+async def joined(bot, uid: int) -> bool:
     try:
         member = await bot.get_chat_member(
-            chat_id=CHANNEL_ID,
-            user_id=user_id
+            CHANNEL_ID,
+            uid
         )
 
         return member.status in (
             "member",
             "administrator",
-            "creator"
+            "creator",
         )
 
-    except Exception as error:
-        print(
-            "CHANNEL CHECK ERROR:",
-            error
-        )
+    except Exception:
         return False
 
 
-# ============================================================
-# JOIN MESSAGE
-# ============================================================
-
-async def send_join_message(
-    message
-):
-
-    keyboard = InlineKeyboardMarkup(
+async def send_join_message(message):
+    keyboard = InlineKeyboardMarkup([
         [
-            [
-                InlineKeyboardButton(
-                    "📢 Join Channel",
-                    url=CHANNEL_LINK
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔍 Check Join",
-                    callback_data="check"
-                )
-            ],
-        ]
-    )
+            InlineKeyboardButton(
+                "📢 Join Channel",
+                url=CHANNEL_LINK
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔍 Check Join",
+                callback_data="check"
+            )
+        ],
+    ])
 
     await message.reply_text(
-        "✨ <b>WELCOME!</b> ✨\n\n"
+        "✨ *WELCOME!* ✨\n\n"
         "👉 প্রথমে আমাদের Channel-এ Join করুন।\n\n"
-        "তারপর <b>Check Join</b> চাপুন।",
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard
+        "তারপর নিচের *Check Join* বাটনে চাপুন।",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
     )
 
 
-# ============================================================
-# SHOW MAIN MENU
-# ============================================================
-
-async def show_main_menu(
-    target,
-    edit=False
-):
-
+async def send_main_menu(target, edit=False):
     text = (
-        "✨ <b>PANEL BOT</b> ✨\n\n"
-        "🪙 Coin\n"
-        "👥 Referral\n"
-        "🎯 Daily Spin\n"
-        "💎 Paid Panel\n"
-        "🎁 Free Panel"
+        "✨ *PANEL BOT* ✨\n\n"
+        "🪙 Coin • 👥 Referral • 🎯 Daily Spin\n"
+        "💎 Paid Panel • 🎁 Free Panel"
     )
 
     if edit:
-
         await target.edit_message_text(
             text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=menu(),
         )
-
     else:
-
         await target.reply_text(
             text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=menu(),
         )
 
 
-# ============================================================
-# START COMMAND
-# ============================================================
+# ==============================================================================
+# /START
+# ==============================================================================
 
 async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-
     user = update.effective_user
 
     if not user:
@@ -373,148 +287,124 @@ async def start(
         user.username
     )
 
-    # -------------------------------
-    # REFERRAL
-    # -------------------------------
-
+    # Referral
     if context.args:
+        ref_arg = context.args[0].strip()
 
-        argument = context.args[0]
+        if ref_arg.isdigit():
+            ref = int(ref_arg)
 
-        if argument.isdigit():
-
-            referrer_id = int(
-                argument
-            )
-
-            if referrer_id != user.id:
-
-                existing = conn.execute(
+            if ref != user.id:
+                already = conn.execute(
                     """
                     SELECT 1
                     FROM referrals
                     WHERE new_user = ?
                     """,
-                    (user.id,)
+                    (user.id,),
                 ).fetchone()
 
-                if existing is None:
+                if already is None:
+                    ensure_user(ref)
 
-                    ensure_user(
-                        referrer_id
+                    conn.execute(
+                        """
+                        INSERT INTO referrals
+                        (new_user, referrer)
+                        VALUES (?, ?)
+                        """,
+                        (user.id, ref),
                     )
 
-                    try:
+                    conn.execute(
+                        """
+                        UPDATE users
+                        SET referrals = referrals + 1,
+                            coins = coins + 5
+                        WHERE user_id = ?
+                        """,
+                        (ref,),
+                    )
 
-                        conn.execute(
-                            """
-                            INSERT INTO referrals
-                            (new_user, referrer)
-                            VALUES (?, ?)
-                            """,
-                            (
-                                user.id,
-                                referrer_id
-                            )
-                        )
+                    conn.commit()
 
-                        conn.execute(
-                            """
-                            UPDATE users
-                            SET referrals = referrals + 1,
-                                coins = coins + 5
-                            WHERE user_id = ?
-                            """,
-                            (referrer_id,)
-                        )
-
-                        conn.commit()
-
-                    except sqlite3.IntegrityError:
-
-                        conn.rollback()
-
-    # -------------------------------
-    # CHANNEL CHECK
-    # -------------------------------
-
-    if not await is_joined(
+    # Channel verification
+    if not await joined(
         context.bot,
         user.id
     ):
-
         await send_join_message(
             update.message
         )
-
         return
 
-    await show_main_menu(
+    await send_main_menu(
         update.message
     )
 
 
-# ============================================================
-# HELP COMMAND
-# ============================================================
+# ==============================================================================
+# /HELP
+# ==============================================================================
 
 async def help_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-
     await update.message.reply_text(
-        "📍 <b>HELP</b>\n\n"
+        "📍 *HELP*\n\n"
         "/start - Start bot\n"
-        "/help - Help\n"
         "/admin - Admin panel\n"
         "/stats - Statistics\n"
-        "/addfree Name|URL\n"
-        "/addpaid Name|URL\n"
-        "/delpanel ID",
-        parse_mode=ParseMode.HTML
+        "/addfree Name|URL - Add free panel\n"
+        "/addpaid Name|URL - Add paid panel\n"
+        "/delpanel ID - Delete panel\n\n"
+        "Channel join verification is required.",
+        parse_mode=ParseMode.MARKDOWN,
     )
 
 
-# ============================================================
-# ADMIN COMMAND
-# ============================================================
+# ==============================================================================
+# ADMIN
+# ==============================================================================
 
-async def admin_command(
+def is_admin(uid: int) -> bool:
+    return uid in ADMIN_IDS
+
+
+async def admin_cmd(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    uid = update.effective_user.id
 
-    if update.effective_user.id not in ADMIN_IDS:
-
+    if not is_admin(uid):
         await update.message.reply_text(
             "⛔ Admin only."
         )
-
         return
 
     await update.message.reply_text(
-        "👑 <b>ADMIN PANEL</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=admin_menu()
+        "👑 *ADMIN PANEL*",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=admin_menu(),
     )
 
 
-# ============================================================
-# STATS COMMAND
-# ============================================================
+# ==============================================================================
+# /STATS
+# ==============================================================================
 
 async def stats_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    uid = update.effective_user.id
 
-    if update.effective_user.id not in ADMIN_IDS:
-
+    if not is_admin(uid):
         await update.message.reply_text(
             "⛔ Admin only."
         )
-
         return
 
     users = conn.execute(
@@ -529,39 +419,38 @@ async def stats_command(
         "SELECT COALESCE(SUM(coins), 0) FROM users"
     ).fetchone()[0]
 
-    referrals = conn.execute(
+    refs = conn.execute(
         "SELECT COALESCE(SUM(referrals), 0) FROM users"
     ).fetchone()[0]
 
     text = (
-        "📊 <b>BOT STATS</b>\n\n"
-        f"👤 Users: <code>{users}</code>\n"
-        f"📜 Panels: <code>{panels}</code>\n"
-        f"🪙 Total Coins: <code>{coins}</code>\n"
-        f"👥 Total Referrals: <code>{referrals}</code>"
+        "📊 *BOT STATS*\n\n"
+        f"👤 *Users:* `{users}`\n"
+        f"📜 *Panels:* `{panels}`\n"
+        f"🪙 *Total Coins:* `{coins}`\n"
+        f"👥 *Total Referrals:* `{refs}`"
     )
 
     await update.message.reply_text(
         text,
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.MARKDOWN
     )
 
 
-# ============================================================
-# ADD FREE PANEL
-# ============================================================
+# ==============================================================================
+# /ADDFREE
+# ==============================================================================
 
 async def addfree_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    uid = update.effective_user.id
 
-    if update.effective_user.id not in ADMIN_IDS:
-
+    if not is_admin(uid):
         await update.message.reply_text(
             "⛔ Admin only."
         )
-
         return
 
     raw = " ".join(
@@ -569,12 +458,10 @@ async def addfree_command(
     ).strip()
 
     if "|" not in raw:
-
         await update.message.reply_text(
             "⚠️ ব্যবহার:\n"
-            "/addfree Panel Name|https://example.com"
+            "/addfree Panel Name|https://example.com/panel"
         )
-
         return
 
     name, value = raw.split(
@@ -586,11 +473,9 @@ async def addfree_command(
     value = value.strip()
 
     if not name or not value:
-
         await update.message.reply_text(
             "⚠️ Name এবং URL দিতে হবে।"
         )
-
         return
 
     add_panel(
@@ -600,27 +485,25 @@ async def addfree_command(
     )
 
     await update.message.reply_text(
-        "✅ Free Panel added:\n"
-        f"<b>{name}</b>",
-        parse_mode=ParseMode.HTML
+        f"✅ Free Panel added: *{name}*",
+        parse_mode=ParseMode.MARKDOWN
     )
 
 
-# ============================================================
-# ADD PAID PANEL
-# ============================================================
+# ==============================================================================
+# /ADDPAID
+# ==============================================================================
 
 async def addpaid_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    uid = update.effective_user.id
 
-    if update.effective_user.id not in ADMIN_IDS:
-
+    if not is_admin(uid):
         await update.message.reply_text(
             "⛔ Admin only."
         )
-
         return
 
     raw = " ".join(
@@ -628,12 +511,10 @@ async def addpaid_command(
     ).strip()
 
     if "|" not in raw:
-
         await update.message.reply_text(
             "⚠️ ব্যবহার:\n"
-            "/addpaid VIP Panel|https://example.com"
+            "/addpaid VIP Panel|https://example.com/panel"
         )
-
         return
 
     name, value = raw.split(
@@ -645,11 +526,9 @@ async def addpaid_command(
     value = value.strip()
 
     if not name or not value:
-
         await update.message.reply_text(
             "⚠️ Name এবং URL দিতে হবে।"
         )
-
         return
 
     add_panel(
@@ -659,216 +538,194 @@ async def addpaid_command(
     )
 
     await update.message.reply_text(
-        "✅ Paid Panel added:\n"
-        f"<b>{name}</b>",
-        parse_mode=ParseMode.HTML
+        f"✅ Paid Panel added: *{name}*",
+        parse_mode=ParseMode.MARKDOWN
     )
 
 
-# ============================================================
-# DELETE PANEL
-# ============================================================
+# ==============================================================================
+# /DELPANEL
+# ==============================================================================
 
 async def delpanel_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    uid = update.effective_user.id
 
-    if update.effective_user.id not in ADMIN_IDS:
-
+    if not is_admin(uid):
         await update.message.reply_text(
             "⛔ Admin only."
         )
-
         return
 
-    if not context.args:
-
+    if (
+        not context.args
+        or not context.args[0].isdigit()
+    ):
         await update.message.reply_text(
             "⚠️ ব্যবহার:\n"
-            "/delpanel ID"
+            "/delpanel Panel_ID"
         )
-
-        return
-
-    panel_id_text = context.args[0]
-
-    if not panel_id_text.isdigit():
-
-        await update.message.reply_text(
-            "⚠️ ID অবশ্যই সংখ্যা হতে হবে।"
-        )
-
         return
 
     panel_id = int(
-        panel_id_text
+        context.args[0]
     )
 
-    result = conn.execute(
+    cur = conn.execute(
         """
         DELETE FROM panels
         WHERE id = ?
         """,
-        (panel_id,)
+        (panel_id,),
     )
 
     conn.commit()
 
-    if result.rowcount > 0:
-
+    if cur.rowcount:
         await update.message.reply_text(
-            f"🗑️ Panel #{panel_id} deleted."
+            f"🗑️ Panel #{panel_id} মুছে ফেলা হয়েছে।"
         )
-
     else:
-
         await update.message.reply_text(
             "❌ Panel ID পাওয়া যায়নি।"
         )
 
 
-# ============================================================
-# CALLBACK HANDLER
-# ============================================================
+# ==============================================================================
+# CALLBACKS
+# ==============================================================================
 
-async def callback_handler(
+async def callbacks(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-
     query = update.callback_query
 
     if not query:
         return
 
-    user_id = query.from_user.id
+    uid = query.from_user.id
 
     ensure_user(
-        user_id,
+        uid,
         query.from_user.username
     )
 
-    # ========================================================
+    # --------------------------------------------------------------------------
     # CHECK JOIN
-    # ========================================================
+    # --------------------------------------------------------------------------
 
     if query.data == "check":
-
-        if await is_joined(
+        if await joined(
             context.bot,
-            user_id
+            uid
         ):
-
             await query.answer(
                 "✅ Join verified!"
             )
 
-            await show_main_menu(
+            await send_main_menu(
                 query,
                 edit=True
             )
-
         else:
-
             await query.answer(
-                "❌ আপনি এখনো Channel Join করেননি।",
+                "❌ আপনি এখনো Channel-এ Join হননি!",
                 show_alert=True
             )
 
         return
 
-    # ========================================================
-    # CHANNEL VERIFICATION
-    # ========================================================
+    # --------------------------------------------------------------------------
+    # ADMIN CALLBACKS
+    # --------------------------------------------------------------------------
 
-    if not await is_joined(
-        context.bot,
-        user_id
+    if query.data in (
+        "astats",
+        "alist",
     ):
+        if not is_admin(uid):
+            await query.answer(
+                "⛔ Admin only.",
+                show_alert=True
+            )
+            return
 
+    # --------------------------------------------------------------------------
+    # JOIN CHECK FOR NORMAL BUTTONS
+    # --------------------------------------------------------------------------
+
+    if not await joined(
+        context.bot,
+        uid
+    ):
         await query.answer(
-            "❌ আগে Channel Join করুন।",
+            "❌ আগে Channel-এ Join করুন!",
             show_alert=True
         )
-
         return
 
     await query.answer()
 
-    user_data = get_user(
-        user_id
-    )
+    row = get_user(uid)
 
-    if user_data is None:
+    if row is None:
+        ensure_user(uid)
+        row = get_user(uid)
 
-        ensure_user(
-            user_id,
-            query.from_user.username
-        )
+    coins, refs, last_spin = row
 
-        user_data = get_user(
-            user_id
-        )
-
-    coins = user_data[0]
-    referrals = user_data[1]
-    last_spin = user_data[2]
-
-    # ========================================================
-    # MY COINS
-    # ========================================================
+    # --------------------------------------------------------------------------
+    # COINS
+    # --------------------------------------------------------------------------
 
     if query.data == "coins":
 
         await query.edit_message_text(
-            "👤 <b>MY ACCOUNT</b>\n\n"
-            f"🪙 Coins: <code>{coins}</code>\n"
-            f"👥 Referrals: <code>{referrals}</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
+            "👤 *MY ACCOUNT*\n\n"
+            f"🪙 *Coins:* `{coins}`\n"
+            f"👥 *Referrals:* `{refs}`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=menu(),
         )
 
-    # ========================================================
+    # --------------------------------------------------------------------------
     # REFERRAL
-    # ========================================================
+    # --------------------------------------------------------------------------
 
     elif query.data == "ref":
 
-        bot_info = await context.bot.get_me()
+        me = await context.bot.get_me()
 
-        referral_link = (
-            "https://t.me/"
-            + bot_info.username
-            + "?start="
-            + str(user_id)
+        link = (
+            f"https://t.me/"
+            f"{me.username}"
+            f"?start={uid}"
         )
 
         await query.edit_message_text(
-            "🎁 <b>REFERRAL</b>\n\n"
-            "🪙 প্রতি valid referral = 5 Coin\n\n"
-            f"👥 Your Referrals: <code>{referrals}</code>\n\n"
-            "🔗 <b>Your Referral Link:</b>\n"
-            f"<code>{referral_link}</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
+            "🎁 *REFERRAL*\n\n"
+            "👉 প্রতি Valid Referral = 🪙 5 Coin\n\n"
+            f"🔗 `{link}`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=menu(),
         )
 
-    # ========================================================
+    # --------------------------------------------------------------------------
     # DAILY SPIN
-    # ========================================================
+    # --------------------------------------------------------------------------
 
     elif query.data == "spin":
 
-        current_day = get_today()
+        today = date.today().isoformat()
 
-        if last_spin == current_day:
-
+        if last_spin == today:
             await query.answer(
                 "⏱️ আজকের Spin ইতিমধ্যে নেওয়া হয়েছে।",
                 show_alert=True
             )
-
             return
 
         reward = random.choice(
@@ -884,24 +741,23 @@ async def callback_handler(
             """,
             (
                 reward,
-                current_day,
-                user_id
-            )
+                today,
+                uid,
+            ),
         )
 
         conn.commit()
 
         await query.edit_message_text(
-            "🎯 <b>DAILY SPIN</b>\n\n"
-            f"🎉 আপনি পেয়েছেন: "
-            f"<b>{reward} Coin</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
+            "🎯 *DAILY SPIN*\n\n"
+            f"🎉 আপনি `{reward}` Coin পেয়েছেন!",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=menu(),
         )
 
-    # ========================================================
+    # --------------------------------------------------------------------------
     # FREE PANELS
-    # ========================================================
+    # --------------------------------------------------------------------------
 
     elif query.data == "free":
 
@@ -915,68 +771,48 @@ async def callback_handler(
             """
         ).fetchall()
 
-        if not rows:
+        if rows:
 
-            await query.edit_message_text(
-                "🎁 <b>FREE PANELS</b>\n\n"
-                "এখনো কোনো Free Panel নেই।",
-                parse_mode=ParseMode.HTML,
-                reply_markup=main_menu()
-            )
+            lines = []
 
-            return
-
-        buttons = []
-
-        for panel_id, name, value in rows:
-
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        "🎁 " + name,
-                        url=value
-                    )
-                ]
-            )
-
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    "🔙 Back",
-                    callback_data="back"
+            for pid, name, value in rows:
+                lines.append(
+                    f"• #{pid} [{name}]({value})"
                 )
-            ]
-        )
+
+            text = (
+                "🎁 *FREE PANELS*\n\n"
+                + "\n".join(lines)
+            )
+
+        else:
+
+            text = (
+                "🎁 *FREE PANELS*\n\n"
+                "এখনো কোনো Free Panel দেওয়া হয়নি।"
+            )
 
         await query.edit_message_text(
-            "🎁 <b>FREE PANELS</b>\n\n"
-            "নিচের Panel নির্বাচন করুন:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(
-                buttons
-            )
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=menu(),
+            disable_web_page_preview=True,
         )
 
-    # ========================================================
+    # --------------------------------------------------------------------------
     # PAID PANEL
-    # ========================================================
+    # --------------------------------------------------------------------------
 
     elif query.data == "paid":
 
-        if (
-            referrals < REQUIRED_REFERRALS
-            and coins < REQUIRED_COINS
-        ):
-
+        if refs < 5 and coins < 100:
             await query.answer(
-                "⚠️ Paid Panel পেতে 5 Referral "
-                "অথবা 100 Coin লাগবে।",
+                "⚠️ Paid Panel পেতে 5 Referral অথবা 100 Coin লাগবে!",
                 show_alert=True
             )
-
             return
 
-        panel = conn.execute(
+        row = conn.execute(
             """
             SELECT name, value
             FROM panels
@@ -986,69 +822,32 @@ async def callback_handler(
             """
         ).fetchone()
 
-        if not panel:
+        if not row:
 
             await query.edit_message_text(
-                "💎 <b>PAID PANEL</b>\n\n"
-                "এখনো কোনো Paid Panel নেই।",
-                parse_mode=ParseMode.HTML,
-                reply_markup=main_menu()
+                "💎 *PAID PANEL*\n\n"
+                "এখনো কোনো Paid Panel upload করা হয়নি।",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=menu(),
             )
 
             return
 
-        panel_name = panel[0]
-        panel_url = panel[1]
-
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "💎 " + panel_name,
-                        url=panel_url
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "🔙 Back",
-                        callback_data="back"
-                    )
-                ],
-            ]
-        )
+        name, value = row
 
         await query.edit_message_text(
-            "💎 <b>PAID PANEL</b>\n\n"
-            "আপনার Paid Panel unlock হয়েছে।",
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard
+            "💎 *PAID PANEL*\n\n"
+            f"[{name}]({value})",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=menu(),
+            disable_web_page_preview=True,
         )
 
-    # ========================================================
-    # BACK
-    # ========================================================
-
-    elif query.data == "back":
-
-        await show_main_menu(
-            query,
-            edit=True
-        )
-
-    # ========================================================
+    # --------------------------------------------------------------------------
     # ADMIN STATS
-    # ========================================================
+    # --------------------------------------------------------------------------
 
     elif query.data == "astats":
-
-        if user_id not in ADMIN_IDS:
-
-            await query.answer(
-                "⛔ Admin only.",
-                show_alert=True
-            )
-
-            return
 
         users = conn.execute(
             "SELECT COUNT(*) FROM users"
@@ -1059,37 +858,34 @@ async def callback_handler(
         ).fetchone()[0]
 
         coins_total = conn.execute(
-            "SELECT COALESCE(SUM(coins), 0) FROM users"
+            """
+            SELECT COALESCE(SUM(coins), 0)
+            FROM users
+            """
         ).fetchone()[0]
 
-        referrals_total = conn.execute(
-            "SELECT COALESCE(SUM(referrals), 0) FROM users"
+        refs_total = conn.execute(
+            """
+            SELECT COALESCE(SUM(referrals), 0)
+            FROM users
+            """
         ).fetchone()[0]
 
         await query.edit_message_text(
-            "📊 <b>BOT STATS</b>\n\n"
-            f"👤 Users: <code>{users}</code>\n"
-            f"📜 Panels: <code>{panels}</code>\n"
-            f"🪙 Total Coins: <code>{coins_total}</code>\n"
-            f"👥 Total Referrals: <code>{referrals_total}</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=admin_menu()
+            "📊 *BOT STATS*\n\n"
+            f"👤 *Users:* `{users}`\n"
+            f"📜 *Panels:* `{panels}`\n"
+            f"🪙 *Total Coins:* `{coins_total}`\n"
+            f"👥 *Total Referrals:* `{refs_total}`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=admin_menu(),
         )
 
-    # ========================================================
+    # --------------------------------------------------------------------------
     # ADMIN PANEL LIST
-    # ========================================================
+    # --------------------------------------------------------------------------
 
     elif query.data == "alist":
-
-        if user_id not in ADMIN_IDS:
-
-            await query.answer(
-                "⛔ Admin only.",
-                show_alert=True
-            )
-
-            return
 
         rows = conn.execute(
             """
@@ -1104,56 +900,54 @@ async def callback_handler(
 
             lines = []
 
-            for panel_id, name, kind in rows:
-
+            for pid, name, kind in rows:
                 lines.append(
-                    "#"
-                    + str(panel_id)
-                    + " | "
-                    + name
-                    + " | "
-                    + kind
+                    f"#{pid} | {name} | {kind}"
                 )
 
             text = (
-                "📜 <b>PANELS</b>\n\n"
+                "📜 *PANELS*\n\n"
                 + "\n".join(lines)
             )
 
         else:
 
             text = (
-                "📜 <b>PANELS</b>\n\n"
+                "📜 *PANELS*\n\n"
                 "কোনো Panel নেই।"
             )
 
         await query.edit_message_text(
             text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=admin_menu()
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=admin_menu(),
         )
 
 
-# ============================================================
+# ==============================================================================
 # ERROR HANDLER
-# ============================================================
+# ==============================================================================
 
 async def error_handler(
-    update,
+    update: object,
     context: ContextTypes.DEFAULT_TYPE
 ):
-
     print(
         "BOT ERROR:",
         repr(context.error)
     )
 
 
-# ============================================================
-# CREATE APPLICATION
-# ============================================================
+# ==============================================================================
+# APPLICATION
+# ==============================================================================
 
 def create_app():
+
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "BOT_TOKEN environment variable is missing."
+        )
 
     app = (
         Application.builder()
@@ -1178,7 +972,7 @@ def create_app():
     app.add_handler(
         CommandHandler(
             "admin",
-            admin_command
+            admin_cmd
         )
     )
 
@@ -1212,7 +1006,7 @@ def create_app():
 
     app.add_handler(
         CallbackQueryHandler(
-            callback_handler
+            callbacks
         )
     )
 
@@ -1223,48 +1017,19 @@ def create_app():
     return app
 
 
-# ============================================================
-# START BOT
-# ============================================================
+# ==============================================================================
+# MAIN
+# ==============================================================================
 
 if __name__ == "__main__":
 
-    print(
-        "================================"
-    )
-
-    print(
-        "       PANEL BOT STARTING"
-    )
-
-    print(
-        "================================"
-    )
-
-    print(
-        "Database:",
-        DB_PATH
-    )
-
-    print(
-        "Channel:",
-        CHANNEL_ID
-    )
-
-    print(
-        "Admins:",
-        len(ADMIN_IDS)
-    )
-
-    print(
-        "Mode: Polling"
-    )
-
-    print(
-        "================================"
-    )
-
     application = create_app()
+
+    print("================================")
+    print("        PANEL BOT STARTED       ")
+    print("================================")
+    print(f"Database: {DB}")
+    print("Polling started...")
 
     application.run_polling(
         drop_pending_updates=True
